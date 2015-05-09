@@ -670,6 +670,13 @@ class Transaction:
     def get_fee(self):
         return self.input_value() - self.output_value()
 
+    def estimated_fee(self, fee_per_kb):
+        estimated_size = len(self.serialize(-1)) / 2
+        fee = int(fee_per_kb * estimated_size / 1000.)
+        if fee < MIN_RELAY_TX_FEE:
+            fee = MIN_RELAY_TX_FEE
+        return fee
+
     def signature_count(self):
         r = 0
         s = 0
