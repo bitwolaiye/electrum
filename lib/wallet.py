@@ -51,13 +51,23 @@ class CoinChooser(object):
     EXTRA_BTC_PENALTY = EXTRA_ADDR_PENALTY / 3
     # Loose ceiling on max candidates generated
     MAX_CANDIDATES = 100
+    # Maximum amount lost to fees because of change rounding
+    MAX_CHANGE_ROUNDING_LOSS = 1000
+    # Breaking up change will not give change amounts less than this (0.05 BTC)
+    MIN_CHANGE = COIN / 20
 
-    def __init__(self, coins, outputs, change_addrs, fixed_fee, fee_per_kb):
-        self.coins = coins
-        self.outputs = outputs
-        self.change_addrs = change_addrs
-        self.fixed_fee = fixed_fee
-        self.fee_per_kb = fee_per_kb
+    def __init__(self):
+        pass
+
+    def calc_stats(self):
+        '''Across output values calc min and max trailing zeroes'''
+        def trailing_zeroes(val):
+            s = str(val)
+            return len(s) - len(s.rstrip('0'))
+        vals = [val for t, a, val in self.outputs]
+        zeroes = map(trailing_zeroes, vals)
+        self.min_zeroes = min(zeroes)
+        self.max_zeroes = max(zeroes)
 
     def bucketize_coins(self):
         buckets = defaultdict(list)
@@ -106,7 +116,7 @@ class CoinChooser(object):
             return True
 
         for i, (bucket, total) in enumerate(bucket_totals):
-            # FIXME: needs a bit more subtlety here
+            # FIXME: is a bit more subtlety needed here?
             if total >= reqd_amount:
                 add_candidate([bucket])   # Singletons
             else:
@@ -122,13 +132,39 @@ class CoinChooser(object):
         # Each address output is about 33 bytes
         fee_per_output = self.fee_per_kb * 33 / 1024 if self.fixed_fee is None else 0
 
+        # Calculate how many change addrs to use
+        avg_output = max(tx.output_value() / len(tx.outputs), CoinChooser.MIN_CHANGE)
+        count = max(1, min(int(round(change_amount / float(avg_output))), len(self.change_addrs)))
+        change_addrs = self.change_addrs[:count][::-1]
+
+        zeroes = range(max(0, self.min_zeroes - 1), min(self.max_zeroes + 1, 8) + 1)
+
         change_outs, msg = [], ''
         # This code only handles a single change output for now
-        for n, change_addr in enumerate(self.change_addrs):
-            if change_amount - fee_per_output < DUST_THRESHOLD:
+        while change_addrs:
+            change_addr = change_addrs.pop()
+            change_amount -= fee_per_output
+            if len(change_addrs):
+                average = change_amount / (len(change_addrs) + 1)
+                this_amount = random.randrange(average - average / 4, average + average / 4)
+                this_amount = int(round(this_amount, -random.choice(zeroes)))
+            else:
+                this_amount = change_amount
+                rounded_amt = int(round(this_amount, -zeroes[0]))
+                if rounded_amt > this_amount:
+                    rounded_amt -= pow(10, zeroes[0])
+                assert rounded_amt <= this_amount
+                if 0 < this_amount - rounded_amt < CoinChooser.MAX_CHANGE_ROUNDING_LOSS:
+                    msg = 'Rounding change amount; adding %d satoshis to fees' % (this_amount - rounded_amt)
+                    this_amount = rounded_amt
+
+            # If the last amount is dust, drop it
+            if this_amount < DUST_THRESHOLD:
+                assert not change_addrs
                 msg = 'Dust change added to fee'
                 break;
-            change_outs.append((change_addr, change_amount - fee_per_output))
+            change_outs.append((change_addr, this_amount))
+            change_amount -= this_amount
 
         return change_outs, msg
 
@@ -150,7 +186,7 @@ class CoinChooser(object):
         # Penalize each extra address revealed by 1m
         penalty = (len(candidate) - 1) * CoinChooser.EXTRA_ADDR_PENALTY
         # Penalize excess input over output
-        penalty += max(0, change_amount * CoinChooser.EXTRA_BTC_PENALTY / 100000000)
+        penalty += max(0, change_amount * CoinChooser.EXTRA_BTC_PENALTY / COIN)
         change_outs, msg = self.change_outputs(tx, est_fee)
 
         for addr, amount in change_outs:
@@ -161,13 +197,20 @@ class CoinChooser(object):
         # Assert our fee is not wild
         tx_fee = tx.get_fee()
         if self.fixed_fee is None:
-            assert tx_fee <= est_fee + DUST_THRESHOLD + self.fee_per_kb / 6
+            assert tx_fee <= (est_fee + CoinChooser.MAX_CHANGE_ROUNDING_LOSS + DUST_THRESHOLD
+                              + len(change_outs) * 40 * self.fee_per_kb / 1024)
         else:
             assert tx_fee <= est_fee + DUST_THRESHOLD
 
         return tx, penalty, msg
 
-    def choose_coins(self):
+    def make_tx(self, coins, outputs, change_addrs, fixed_fee, fee_per_kb):
+        self.coins = coins
+        self.outputs = outputs
+        self.change_addrs = change_addrs
+        self.fixed_fee = fixed_fee
+        self.fee_per_kb = fee_per_kb
+        self.calc_stats()
         send_amount = sum(map(lambda x:x[2], self.outputs))
         reqd_amount = send_amount + (self.fixed_fee if self.fixed_fee is not None else 0)
         buckets = self.bucketize_coins()
@@ -177,13 +220,16 @@ class CoinChooser(object):
             tx, penalty, msg = self.score_candidate_tx(candidate, buckets)
             if tx and penalty < best[2]:
                 best = (tx, candidate, penalty, msg)
-        if not best[0]:
+        tx = best[0]
+        if not tx:
             raise NotEnoughFunds()
-        print_error("Best candidate: %s Penalty : %d Fee: %d Estimated Fee: %d" %
-                    (best[1], best[2], best[0].get_fee(), best[0].estimated_fee(self.fee_per_kb)))
         if best[3]:
-            print_error(*best[3])
-        return best[0]
+            print_error(best[3])
+        # For debugging whilst in development
+        print_error("Best candidate: %s Penalty : %d Fee: %d Estimated Fee: %d" %
+                    (best[1], best[2], best[0].get_fee(), tx.estimated_fee(self.fee_per_kb)))
+        print_error("Outputs:", tx.outputs)
+        return tx
 
 
 # internal ID for imported account
@@ -321,6 +367,7 @@ class Abstract_Wallet(object):
         self.lock = threading.Lock()
         self.transaction_lock = threading.Lock()
         self.tx_event = threading.Event()
+        self.coin_chooser = CoinChooser()
 
         # save wallet type the first time
         if self.storage.get('wallet_type') is None:
@@ -994,18 +1041,18 @@ class Abstract_Wallet(object):
         for coin in coins:
             self.add_input_info(coin)
 
+        change_addrs = [change_addr]
         if coins and not change_addr:
             address = coins[0].get('address')
             account, _ = self.get_address_index(address)
             # If we cannot generate change addresses, send to one of the
             # accounts involved in the tx
             if not self.use_change or not self.accounts[account].has_change():
-                change_addr = address
+                change_addrs = [address]
             else:
-                change_addr = self.accounts[account].get_addresses(1)[-self.gap_limit_for_change]
+                change_addrs = self.accounts[account].get_addresses(1)[-self.gap_limit_for_change:]
 
-        chooser = CoinChooser(coins, outputs, [change_addr], fixed_fee, self.fee_per_kb)
-        tx = chooser.choose_coins()
+        tx = self.coin_chooser.make_tx(coins, outputs, change_addrs, fixed_fee, self.fee_per_kb)
         run_hook('make_unsigned_transaction', tx)
         return tx
 
