@@ -30,7 +30,35 @@ import util
 import bitcoin
 from bitcoin import *
 
-MAX_TARGET = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
+def bits_to_target(bits):
+    if bits == 0:
+        return 0
+    bitsN = (bits >> 24) & 0xff
+    assert 0x03 <= bitsN <= 0x1d
+    bitsBase = bits & 0xffffff
+    assert 0x8000 <= bitsBase <= 0x7fffff
+    return bitsBase << (8 * (bitsN-3))
+
+def target_to_bits(target):
+    if target == 0:
+        return 0
+    target = min(target, MAX_TARGET)
+    size = (target.bit_length() + 7) / 8
+    mask64 = 0xffffffffffffffff
+    if size <= 3:
+        compact = (target & mask64) << (8 * (3 - size))
+    else:
+        compact = (target >> (8 * (size - 3))) & mask64
+
+    if compact & 0x00800000:
+        compact >>= 8
+        size += 1
+    assert compact == (compact & 0x007fffff)
+    assert size < 256
+    return compact | size << 24
+
+MAX_BITS = 0x1d00ffff
+MAX_TARGET = bits_to_target(MAX_BITS)
 
 def serialize_header(res):
     s = int_to_hex(res.get('version'), 4) \
@@ -66,6 +94,7 @@ class Blockchain(util.PrintError):
     '''Manages blockchain headers and their verification'''
 
     def __init__(self, config, filename, fork_point):
+        self.cur_chunk = None
         self.config = config
         self.filename = filename
         self.catch_up = None # interface catching up
@@ -81,7 +110,7 @@ class Blockchain(util.PrintError):
     def height(self):
         return self.local_height + len(self.headers)
 
-    def verify_header(self, header, prev_header, bits, target):
+    def verify_header(self, header, prev_header, bits):
         prev_hash = hash_header(prev_header)
         _hash = hash_header(header)
         if prev_hash != header.get('prev_block_hash'):
@@ -90,29 +119,24 @@ class Blockchain(util.PrintError):
             return
         if bits != header.get('bits'):
             raise BaseException("bits mismatch: %s vs %s" % (bits, header.get('bits')))
+        target = bits_to_target(bits)
         if int('0x' + _hash, 16) > target:
             raise BaseException("insufficient proof of work: %s vs target %s" % (int('0x' + _hash, 16), target))
 
-    def verify_chain(self, chain):
-        first_header = chain[0]
-        prev_header = self.read_header(first_header.get('block_height') - 1)
-        for header in chain:
-            height = header.get('block_height')
-            bits, target = self.get_target(height / 2016, chain)
-            self.verify_header(header, prev_header, bits, target)
-            prev_header = header
-
     def verify_chunk(self, index, data):
+        self.cur_chunk = data
+        self.cur_chunk_index = index
         num = len(data) / 80
         prev_header = None
         if index != 0:
             prev_header = self.read_header(index*2016 - 1)
-        bits, target = self.get_target(index)
         for i in range(num):
             raw_header = data[i*80:(i+1) * 80]
             header = deserialize_header(raw_header, index*2016 + i)
-            self.verify_header(header, prev_header, bits, target)
+            bits = self.get_bits(header['block_height'])
+            self.verify_header(header, prev_header, bits)
             prev_header = header
+        self.cur_chunk = None
 
     def path(self):
         d = util.get_headers_dir(self.config)
@@ -181,6 +205,13 @@ class Blockchain(util.PrintError):
             header = self.headers[i]
             assert header.get('block_height') == height
             return header
+
+        if self.cur_chunk and height // 2016 == self.cur_chunk_index:
+            n = height % 2016
+            h = self.cur_chunk[n * 80: (n + 1) * 80]
+            if len(h) == 80:
+                return deserialize_header(h, height)
+
         name = self.path()
         if os.path.exists(name):
             f = open(name, 'rb')
@@ -210,43 +241,47 @@ class Blockchain(util.PrintError):
         f.truncate()
         f.close()
 
-    def get_target(self, index, chain=None):
+    def get_median_time_past(self, height):
+        times = [self.read_header(h)['timestamp']
+                 for h in range(max(0, height - 10), height + 1)]
+        return sorted(times)[len(times) // 2]
+
+    def get_bits(self, height):
+        '''Return bits for the given height.'''
         if bitcoin.TESTNET:
-            return 0, 0
-        if index == 0:
-            return 0x1d00ffff, MAX_TARGET
-        first = self.read_header((index-1) * 2016)
-        last = self.read_header(index*2016 - 1)
-        if last is None:
-            for h in chain:
-                if h.get('block_height') == index*2016 - 1:
-                    last = h
-        assert last is not None
-        # bits to target
-        bits = last.get('bits')
-        bitsN = (bits >> 24) & 0xff
-        if not (bitsN >= 0x03 and bitsN <= 0x1d):
-            raise BaseException("First part of bits should be in [0x03, 0x1d]")
-        bitsBase = bits & 0xffffff
-        if not (bitsBase >= 0x8000 and bitsBase <= 0x7fffff):
-            raise BaseException("Second part of bits should be in [0x8000, 0x7fffff]")
-        target = bitsBase << (8 * (bitsN-3))
-        # new target
-        nActualTimespan = last.get('timestamp') - first.get('timestamp')
-        nTargetTimespan = 14 * 24 * 60 * 60
-        nActualTimespan = max(nActualTimespan, nTargetTimespan / 4)
-        nActualTimespan = min(nActualTimespan, nTargetTimespan * 4)
-        new_target = min(MAX_TARGET, (target*nActualTimespan) / nTargetTimespan)
-        # convert new target to bits
-        c = ("%064x" % new_target)[2:]
-        while c[:2] == '00' and len(c) > 6:
-            c = c[2:]
-        bitsN, bitsBase = len(c) / 2, int('0x' + c[:6], 16)
-        if bitsBase >= 0x800000:
-            bitsN += 1
-            bitsBase >>= 8
-        new_bits = bitsN << 24 | bitsBase
-        return new_bits, bitsBase << (8 * (bitsN-3))
+            return 0
+        # Difficulty adjustment interval?
+        if height % 2016 == 0:
+            return self.get_new_bits(height)
+        prior = self.read_header(height - 1)
+        bits = prior['bits']
+        # Can't go below minimum, so early bail
+        if bits == MAX_BITS:
+            return bits
+        mtp_6blocks = (self.get_median_time_past(height - 1)
+                       - self.get_median_time_past(height - 7))
+        if mtp_6blocks < 12 * 3600:
+            return bits
+        # If it took over 12hrs to produce the last 6 blocks, increase the
+        # target by 25% (reducing difficulty by 20%).
+        target = bits_to_target(bits)
+        target += target >> 2
+        return target_to_bits(target)
+
+    def get_new_bits(self, height):
+        assert height % 2016 == 0
+        # Genesis
+        if height == 0:
+            return MAX_BITS
+        first = self.read_header(height - 2016)
+        prior = self.read_header(height - 1)
+        prior_target = bits_to_target(prior['bits'])
+
+        target_span = 14 * 24 * 60 * 60
+        span = prior['timestamp'] - first['timestamp']
+        span = min(max(span, target_span / 4), target_span * 4)
+        new_target = (prior_target * span) / target_span
+        return target_to_bits(new_target)
 
     def can_connect(self, header):
         previous_height = header['block_height'] - 1
@@ -257,9 +292,9 @@ class Blockchain(util.PrintError):
         if prev_hash != header.get('prev_block_hash'):
             return False
         height = header.get('block_height')
-        bits, target = self.get_target(height / 2016)
+        bits = self.get_bits(height)
         try:
-            self.verify_header(header, previous_header, bits, target)
+            self.verify_header(header, previous_header, bits)
         except:
             return False
         return True
