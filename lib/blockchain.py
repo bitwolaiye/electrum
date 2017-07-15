@@ -33,11 +33,16 @@ from bitcoin import *
 def bits_to_target(bits):
     if bits == 0:
         return 0
-    bitsN = (bits >> 24) & 0xff
-    assert 0x03 <= bitsN <= 0x1d
-    bitsBase = bits & 0xffffff
-    assert 0x8000 <= bitsBase <= 0x7fffff
-    return bitsBase << (8 * (bitsN-3))
+    size = bits >> 24
+    assert size <= 0x1d
+
+    word = bits & 0x00ffffff
+    assert 0x8000 <= word <= 0x7fffff
+
+    if size <= 3:
+        return word >> (8 * (3 - size))
+    else:
+        return word << (8 * (size - 3))
 
 def target_to_bits(target):
     if target == 0:
