@@ -501,7 +501,7 @@ class Transaction:
             self.raw = self.serialize()
         return self.raw
 
-    def __init__(self, raw):
+    def __init__(self, raw, is_fork=False, fork_id=0x00):
         if raw is None:
             self.raw = None
         elif type(raw) in [str, unicode]:
@@ -514,6 +514,8 @@ class Transaction:
         self._outputs = None
         self.locktime = 0
         self.version = 1
+        self.is_fork = is_fork
+        self.fork_id = fork_id
 
     def update(self, raw):
         self.raw = raw
@@ -586,8 +588,8 @@ class Transaction:
         return d
 
     @classmethod
-    def from_io(klass, inputs, outputs, locktime=0):
-        self = klass(None)
+    def from_io(klass, inputs, outputs, locktime=0, is_fork=False, fork_id=0x00):
+        self = klass(None, is_fork, fork_id)
         self._inputs = inputs
         self._outputs = outputs
         self.locktime = locktime
@@ -709,7 +711,7 @@ class Transaction:
 
     def serialize_preimage(self, i):
         nVersion = int_to_hex(self.version, 4)
-        nHashType = int_to_hex(1, 4)
+        nHashType = int_to_hex(0x01 | self.fork_id << 8 | get_sighash_forkid(self.is_fork), 4)
         nLocktime = int_to_hex(self.locktime, 4)
         inputs = self.inputs()
         outputs = self.outputs()
@@ -829,7 +831,8 @@ class Transaction:
                     public_key = private_key.get_verifying_key()
                     sig = private_key.sign_digest_deterministic(pre_hash, hashfunc=hashlib.sha256, sigencode = ecdsa.util.sigencode_der)
                     assert public_key.verify_digest(sig, pre_hash, sigdecode = ecdsa.util.sigdecode_der)
-                    txin['signatures'][j] = sig.encode('hex') + '01'
+                    txin['signatures'][j] = sig.encode('hex') \
+                                            + int_to_hex(0x01 | (0x40 and self.is_fork or 0x00))
                     txin['x_pubkeys'][j] = pubkey
                     txin['pubkeys'][j] = pubkey # needed for fd keys
                     self._inputs[i] = txin
@@ -906,3 +909,10 @@ def tx_from_str(txt):
     tx_dict = json.loads(str(txt))
     assert "hex" in tx_dict.keys()
     return tx_dict["hex"]
+
+
+def get_sighash_forkid(is_fork=False):
+    if is_fork:
+        return 0x40
+    else:
+        return 0x00

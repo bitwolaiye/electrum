@@ -73,6 +73,10 @@ DEFAULT_SERVERS = {
     'btc.smsys.me':{'t':'110', 's':'995'},              # BU, e-x
 }
 
+DEFAULT_ACTIVATION_TIME = 0
+DEFAULT_FORKID = 0
+
+
 def set_testnet():
     global DEFAULT_PORTS, DEFAULT_SERVERS
     DEFAULT_PORTS = {'t':'51001', 's':'51002'}
@@ -263,6 +267,16 @@ class Network(util.DaemonThread):
         self.socket_queue = Queue.Queue()
         self.start_network(deserialize_server(self.default_server)[2],
                            deserialize_proxy(self.config.get('proxy')))
+        self.activation_time = self.config.get('activation_time', DEFAULT_ACTIVATION_TIME)
+        self.fork_id = self.config.get('fork_id', DEFAULT_FORKID)
+
+    def set_activation_time(self, activation_time):
+        self.activation_time = activation_time
+        self.config.set_key('activation_time', activation_time)
+
+    def set_fork_id(self, fork_id):
+        self.fork_id = fork_id
+        self.config.set_key('fork_id', fork_id)
 
     def register_callback(self, callback, events):
         with self.lock:
@@ -1060,3 +1074,9 @@ class Network(util.DaemonThread):
         if out != tx_hash:
             return False, "error: " + out
         return True, out
+
+    def is_fork(self, height=None):
+        blockchain = self.blockchains[self.blockchain_index]
+        if height is None:
+            height = blockchain.local_height
+        return blockchain.get_median_time_past(height) > self.activation_time

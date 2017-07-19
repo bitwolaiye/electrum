@@ -842,17 +842,20 @@ class Abstract_Wallet(PrintError):
             # Let the coin chooser select the coins to spend
             max_change = self.max_change_outputs if self.multiple_change else 1
             coin_chooser = coinchooser.get_coin_chooser(config)
-            tx = coin_chooser.make_tx(inputs, outputs, change_addrs[:max_change],
-                                      fee_estimator, self.dust_threshold())
+            tx = coin_chooser.make_tx(inputs, outputs, change_addrs[:max_change], fee_estimator,
+                                      self.dust_threshold(), self.network.is_fork(),
+                                      self.network.fork_id)
         else:
             sendable = sum(map(lambda x:x['value'], inputs))
             _type, data, value = outputs[i_max]
             outputs[i_max] = (_type, data, 0)
-            tx = Transaction.from_io(inputs, outputs[:])
+            tx = Transaction.from_io(inputs, outputs[:], is_fork=self.network.is_fork(),
+                                     fork_id=self.network.fork_id)
             fee = fee_estimator(tx.estimated_size())
             amount = max(0, sendable - tx.output_value() - fee)
             outputs[i_max] = (_type, data, amount)
-            tx = Transaction.from_io(inputs, outputs[:])
+            tx = Transaction.from_io(inputs, outputs[:], is_fork=self.network.is_fork(),
+                                     fork_id=self.network.fork_id)
 
         # Sort the inputs and outputs deterministically
         tx.BIP_LI01_sort()
@@ -902,7 +905,8 @@ class Abstract_Wallet(PrintError):
         total = sum(i.get('value') for i in inputs)
         if fee is None:
             outputs = [(TYPE_ADDRESS, recipient, total)]
-            tx = Transaction.from_io(inputs, outputs)
+            tx = Transaction.from_io(inputs, outputs, is_fork=self.network.is_fork(),
+                                 fork_id=self.network.fork_id)
             fee = self.estimate_fee(config, tx.estimated_size())
 
         if total - fee < 0:
@@ -912,7 +916,8 @@ class Abstract_Wallet(PrintError):
             raise BaseException(_('Not enough funds on address.') + '\nTotal: %d satoshis\nFee: %d\nDust Threshold: %d'%(total, fee, self.dust_threshold()))
 
         outputs = [(TYPE_ADDRESS, recipient, total - fee)]
-        tx = Transaction.from_io(inputs, outputs)
+        tx = Transaction.from_io(inputs, outputs, is_fork=self.network.is_fork(),
+                                 fork_id=self.network.fork_id)
         tx.sign(keypairs)
         return tx
 
@@ -1052,7 +1057,8 @@ class Abstract_Wallet(PrintError):
                     continue
         if delta > 0:
             raise BaseException(_('Cannot bump fee: cound not find suitable outputs'))
-        return Transaction.from_io(inputs, outputs)
+        return Transaction.from_io(inputs, outputs, is_fork=self.network.is_fork(),
+                                   fork_id=self.network.fork_id)
 
     def cpfp(self, tx, fee):
         txid = tx.txid()
@@ -1071,7 +1077,8 @@ class Abstract_Wallet(PrintError):
         self.add_input_info(item)
         inputs = [item]
         outputs = [(TYPE_ADDRESS, address, value - fee)]
-        return Transaction.from_io(inputs, outputs)
+        return Transaction.from_io(inputs, outputs, is_fork=self.network.is_fork(),
+                                   fork_id=self.network.fork_id)
 
     def add_input_info(self, txin):
         txin['type'] = self.txin_type

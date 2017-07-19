@@ -137,7 +137,7 @@ class Synchronizer(ThreadJob):
             return
         tx_hash, tx_height = params
         #assert tx_hash == hash_encode(Hash(result.decode('hex')))
-        tx = Transaction(result)
+        tx = Transaction(result, self.network.is_fork(tx_height), self.network.fork_id)
         try:
             tx.deserialize()
         except Exception:

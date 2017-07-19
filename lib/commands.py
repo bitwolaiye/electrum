@@ -218,14 +218,15 @@ class Commands:
                 raise BaseException('Not implemented')
 
         outputs = map(lambda x: (TYPE_ADDRESS, x['address'], int(x['value'])), outputs)
-        tx = Transaction.from_io(inputs, outputs, locktime=locktime)
+        tx = Transaction.from_io(inputs, outputs, locktime=locktime, is_fork=self.network.is_fork(),
+                                 fork_id=self.network.fork_id)
         tx.sign(keypairs)
         return tx.as_dict()
 
     @command('wp')
     def signtransaction(self, tx, privkey=None, password=None):
         """Sign a transaction. The wallet keys will be used unless a private key is provided."""
-        tx = Transaction(tx)
+        tx = Transaction(tx, self.network.is_fork(), self.network.fork_id)
         if privkey:
             pubkey = bitcoin.public_key_from_private_key(privkey)
             h160 = bitcoin.hash_160(pubkey.decode('hex'))
